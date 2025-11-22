@@ -38,7 +38,7 @@ public class MessagePublisherService {
             
             // Passa anche il filename al servizio di estrazione
             String filename = metadata.getOriginalFilename();
-            ExtractionRequestMessage message = new ExtractionRequestMessage(fileId, filename);
+            ExtractionRequestMessage message = new ExtractionRequestMessage(fileId, filename, LocalDateTime.now());
             rabbitTemplate.convertAndSend(exchangeName, extractionRequestKey, message);
             log.info("📤 Published extraction request for fileId: {} (filename: {})", fileId, filename);
         });

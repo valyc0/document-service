@@ -102,8 +102,10 @@ services:
       - SPRING_RABBITMQ_PORT=5672
       - SPRING_RABBITMQ_USERNAME=admin
       - SPRING_RABBITMQ_PASSWORD=admin
+      - CAMEL_WATCH_DIR=/watch
     volumes:
       - ./orchestrator-service/target/orchestrator-service-1.0.0.jar:/app.jar:ro
+      - ./watch:/watch
     command: ["java", "-jar", "/app.jar"]
     depends_on:
       - h2-database
