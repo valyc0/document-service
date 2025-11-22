@@ -1,0 +1,193 @@
+version: '3.8'
+
+services:
+  # ========================================
+  # INFRASTRUCTURE SERVICES
+  # ========================================
+  
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console UI
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - document-network
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - document-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx2g"
+      - http.max_content_length=500mb
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - document-network
+
+  # H2 Database Server
+  h2-database:
+    image: oscarfonts/h2:latest
+    container_name: h2-database
+    ports:
+      - "8083:8082"
+      - "9092:9092"
+    volumes:
+      - orchestrator_data:/opt/h2-data
+    environment:
+      H2_OPTIONS: -ifNotExists -tcp -tcpAllowOthers -tcpPort 9092 -web -webAllowOthers -webPort 8082
+    networks:
+      - document-network
+    restart: unless-stopped
+
+  # ========================================
+  # APPLICATION SERVICES
+  # ========================================
+
+  orchestrator-service:
+    image: eclipse-temurin:17-jre
+    container_name: orchestrator-service
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:h2:tcp://h2-database:9092/h2-data/orchestrator-db
+      - SPRING_DATASOURCE_USERNAME=sa
+      - SPRING_DATASOURCE_PASSWORD=sa
+      - SPRING_H2_CONSOLE_ENABLED=true
+      - SPRING_H2_CONSOLE_SETTINGS_WEB-ALLOW-OTHERS=true
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET_NAME=documents
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=admin
+      - SPRING_RABBITMQ_PASSWORD=admin
+    volumes:
+      - ./orchestrator-service/target/orchestrator-service-1.0.0.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+    depends_on:
+      - h2-database
+      - rabbitmq
+      - minio
+    networks:
+      - document-network
+    restart: unless-stopped
+
+  extraction-service:
+    image: eclipse-temurin:17-jre
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET_NAME: documents
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: admin
+      SPRING_RABBITMQ_PASSWORD: admin
+    volumes:
+      - ./extraction-service/target/extraction-service-1.0.0.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+    depends_on:
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+    networks:
+      - document-network
+
+  indexing-service:
+    build: ./indexing-service
+    container_name: indexing-service
+    environment:
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET_NAME: documents
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: admin
+      SPRING_RABBITMQ_PASSWORD: admin
+    volumes:
+      - ./indexing-service/target/indexing-service-1.0.0.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - document-network
+
+  ui-service:
+    image: eclipse-temurin:17-jre
+    container_name: ui-service
+    ports:
+      - "8090:8090"
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator-service:8080
+      VAADIN_PRODUCTIONMODE: "true"
+    volumes:
+      - ./ui-service/target/ui-service-1.0.0.jar:/app.jar:ro
+    command: ["java", "-jar", "/app.jar"]
+    depends_on:
+      - orchestrator-service
+    restart: unless-stopped
+    networks:
+      - document-network
+
+volumes:
+  minio_data:
+  rabbitmq_data:
+  es_data:
+  orchestrator_data:
+
+networks:
+  document-network:
+    driver: bridge
